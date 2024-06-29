@@ -10,6 +10,9 @@ from Crypto.Cipher import AES
 
 NETWORK_TIMEOUT = 10
 GENERIC_KEY = "a3K8Bx%2r8Y7#xDh"
+GREE_GCM_KEY = "{yxAHAY_Lm6pbC/<"
+GCM_IV = "\x54\x40\x78\x44\x49\x67\x5a\x51\x6c\x5e\x63\x13"
+GCM_ADD = "qualcomm-test"
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -26,7 +29,9 @@ class IPInterface:
 class DeviceProtocol2(asyncio.DatagramProtocol):
     """Event driven device protocol class."""
 
-    def __init__(self, timeout: int = 10, drained: asyncio.Event = None) -> None:
+    def __init__(
+        self, timeout: int = 10, drained: asyncio.Event = None, key: str = GENERIC_KEY
+    ) -> None:
         """Initialize the device protocol object.
 
         Args:
@@ -37,7 +42,8 @@ class DeviceProtocol2(asyncio.DatagramProtocol):
         self._drained = drained or asyncio.Event()
         self._drained.set()
         self._transport = None
-        self._key = GENERIC_KEY
+        self._key = key
+        self._cipher = self.get_cipher(key)
 
     # This event need to be implement to handle incoming requests
     def packet_received(self, obj, addr: IPAddr) -> None:
@@ -58,6 +64,12 @@ class DeviceProtocol2(asyncio.DatagramProtocol):
     def device_key(self, value: str):
         """Gets the encryption key used for device data."""
         self._key = value
+
+    def get_cipher(self, key: str):
+        """Get the AES cipher object."""
+        cipher = AES.new(key.encode(), AES.MODE_GCM, nonce=GCM_IV.encode())
+        cipher.update(GCM_ADD.encode())
+        return cipher
 
     def close(self) -> None:
         """Close the UDP transport."""
@@ -133,13 +145,13 @@ class DeviceProtocol2(asyncio.DatagramProtocol):
         return json.loads(t)
 
     @staticmethod
-    def encrypt_payload(payload, key=GENERIC_KEY):
+    def encrypt_payload(payload, cipher):
         def pad(s):
             bs = 16
             return s + (bs - len(s) % bs) * chr(bs - len(s) % bs)
 
-        cipher = AES.new(key.encode(), AES.MODE_ECB)
-        encrypted = cipher.encrypt(pad(json.dumps(payload)).encode())
+        # cipher = AES.new(key.encode(), AES.MODE_GCM, nonce="s")
+        encrypted, tag = cipher.encrypt_and_digest(pad(json.dumps(payload)).encode())
         encoded = base64.b64encode(encrypted).decode()
         return encoded
 
@@ -172,7 +184,6 @@ class DeviceProtocol(asyncio.DatagramProtocol):
         self._transport = None
 
     def connection_made(self, transport: asyncio.transports.DatagramTransport) -> None:
-
         self._transport = transport
 
     def datagram_received(self, data, addr: IPAddr) -> None:
@@ -240,7 +251,9 @@ class DatagramStream:
         _LOGGER.debug("Sending packet:\n%s", json.dumps(data))
 
         if "pack" in data:
-            data["pack"] = DatagramStream.encrypt_payload(data["pack"], key)
+            data["pack"], data["tag"] = DatagramStream.encrypt_payload(
+                data["pack"], key
+            )
 
         data_bytes = json.dumps(data).encode()
         await self.send(data_bytes)
@@ -265,29 +278,43 @@ class DatagramStream:
         data = json.loads(data_bytes)
 
         if "pack" in data:
-            data["pack"] = DatagramStream.decrypt_payload(data["pack"], key)
+            data["pack"] = DatagramStream.decrypt_payload(
+                data["pack"], data["tag"], key
+            )
 
         _LOGGER.debug("Received packet:\n%s", json.dumps(data))
         return (data, addr)
 
     @staticmethod
-    def decrypt_payload(payload, key=GENERIC_KEY):
-        cipher = AES.new(key.encode(), AES.MODE_ECB)
+    def decrypt_payload(payload, tag, key=GENERIC_KEY):
+        cipher = AES.new(key.encode(), AES.MODE_GCM, nonce=GCM_IV.encode())
+        cipher.update(GCM_ADD.encode())
         decoded = base64.b64decode(payload)
-        decrypted = cipher.decrypt(decoded).decode()
-        t = decrypted.replace(decrypted[decrypted.rindex("}") + 1 :], "")
-        return json.loads(t)
+        decryptedPack = cipher.decrypt(decoded)
+        cipher.verify(base64.b64decode(tag))
+        # t = decrypted.replace(decrypted[decrypted.rindex("}") + 1 :], "")
+        decodedPack = decryptedPack.decode("utf-8")
+        replacedPack = decodedPack.replace("\x0f", "").replace(
+            decodedPack[decodedPack.rindex("}") + 1 :], ""
+        )
+        return json.loads(replacedPack)
 
     @staticmethod
-    def encrypt_payload(payload, key=GENERIC_KEY):
+    def encrypt_payload(payload, key):
         def pad(s):
             bs = 16
             return s + (bs - len(s) % bs) * chr(bs - len(s) % bs)
 
-        cipher = AES.new(key.encode(), AES.MODE_ECB)
-        encrypted = cipher.encrypt(pad(json.dumps(payload)).encode())
+        # if key == GREE_GCM_KEY:
+        cipher = AES.new(key.encode(), AES.MODE_GCM, nonce=GCM_IV.encode())
+        cipher.update(GCM_ADD.encode())
+        encrypted, tag = cipher.encrypt_and_digest(pad(json.dumps(payload)).encode())
+        # else:
+        #     cipher = AES.new(key.encode(), AES.MODE_ECB)
+        #     encrypted = cipher.encrypt(pad(json.dumps(payload)).encode())
         encoded = base64.b64encode(encrypted).decode()
-        return encoded
+        tag = base64.b64encode(tag).decode()
+        return encoded, tag
 
 
 async def create_datagram_stream(target: IPAddr) -> DatagramStream:
@@ -321,6 +348,36 @@ async def bind_device(device_info, announce=False):
             await stream.recv_device_data()
         await stream.send_device_data(payload)
         (r, _) = await stream.recv_device_data()
+    except asyncio.TimeoutError as e:
+        raise e
+    except Exception as e:
+        _LOGGER.exception("Encountered an error trying to bind device")
+        raise e
+    finally:
+        stream.close()
+
+    return r["pack"].get("key")
+
+
+async def bind_device_gcm(device_info, announce=False):
+    payload = {
+        "cid": "app",
+        "i": 1,
+        "t": "pack",
+        "uid": 0,
+        "tcid": device_info.mac,
+        "pack": {"mac": device_info.mac, "t": "bind", "uid": 0},
+    }
+
+    remote_addr = (device_info.ip, device_info.port)
+    stream = await create_datagram_stream(remote_addr)
+    try:
+        # Binding uses the generic key only
+        if announce:
+            await stream.send_device_data({"t": "scan"}, key=GREE_GCM_KEY)
+            await stream.recv_device_data()
+        await stream.send_device_data(payload, key=GREE_GCM_KEY)
+        (r, _) = await stream.recv_device_data(key=GREE_GCM_KEY)
     except asyncio.TimeoutError as e:
         raise e
     except Exception as e:

@@ -12,12 +12,12 @@ _LOGGER = logging.getLogger(__name__)
 
 
 class DiscoveryListener(Listener):
+    """Class to handle incoming device discovery events."""
+
     def __init__(self, bind):
         """Initialize the event handler."""
         super().__init__()
         self.bind = bind
-
-    """Class to handle incoming device discovery events."""
 
     async def device_found(self, device_info: DeviceInfo) -> None:
         """A new device was found on the network."""
@@ -30,15 +30,40 @@ class DiscoveryListener(Listener):
 
 async def run_discovery(bind=False):
     """Run the device discovery process."""
-    _LOGGER.debug("Scanning network for Gree devices")
+    device = Device(
+        DeviceInfo(
+            "192.168.88.42",
+            7000,
+            "9424b8bb14bc",
+            "9424b8bb14bc",
+            "gree",
+            "gree",
+            "V2.0.0",
+        )
+    )
+    await device.bind()
+    await device.request_version()
+    _LOGGER.info(f"Device firmware: {device.hid}")
+    await device.update_state()
+    print(device.power)
+    print(device._properties)
 
-    discovery = Discovery()
-    listener = DiscoveryListener(bind)
-    discovery.add_listener(listener)
+    device.power = True
+    await device.push_state_update()
 
-    await discovery.scan(wait_for=10)
+    await asyncio.sleep(5)
 
-    _LOGGER.info("Done discovering devices")
+    # device.power = False
+    # await device.push_state_update()
+    # _LOGGER.debug("Scanning network for Gree devices")
+
+    # discovery = Discovery()
+    # listener = DiscoveryListener(bind)
+    # discovery.add_listener(listener)
+
+    # await discovery.scan(wait_for=10)
+
+    # _LOGGER.info("Done discovering devices")
 
 
 if __name__ == "__main__":

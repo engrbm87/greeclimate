@@ -90,9 +90,11 @@ class VerticalSwing(IntEnum):
     SwingLowerMiddle = 10
     SwingLower = 11
 
+
 class DehumidifierMode(IntEnum):
     Default = 0
     AnionOnly = 9
+
 
 def generate_temperature_record(temp_f):
     temSet = round((temp_f - 32.0) * 5.0 / 9.0)
@@ -108,6 +110,7 @@ TEMP_MAX_F = 86
 TEMP_TABLE = [generate_temperature_record(x) for x in range(TEMP_MIN_F, TEMP_MAX_F + 1)]
 HUMIDITY_MIN = 30
 HUMIDITY_MAX = 80
+
 
 class DeviceInfo:
     """Device information class, used to identify and connect
@@ -222,7 +225,7 @@ class Device:
             if key:
                 self.device_key = key
             else:
-                self.device_key = await network.bind_device(
+                self.device_key = await network.bind_device_gcm(
                     self.device_info, announce=False
                 )
         except asyncio.TimeoutError:
@@ -495,13 +498,13 @@ class Device:
     @property
     def target_humidity(self) -> int:
         15 + (self.get_property(Props.HUM_SET) * 5)
-    
+
     @target_humidity.setter
     def target_humidity(self, value: int):
         def validate(val):
             if value > HUMIDITY_MAX or val < HUMIDITY_MIN:
                 raise ValueError(f"Specified temperature {val} is out of range.")
-        
+
         self.set_property(Props.HUM_SET, (value - 15) // 5)
 
     @property
