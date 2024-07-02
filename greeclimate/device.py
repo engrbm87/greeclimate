@@ -1,14 +1,38 @@
+"""Represent a gree AV device."""
+
 import asyncio
 import enum
 import logging
 import re
 from enum import IntEnum, unique
+from typing import Any, Dict, List, Optional
 
-import greeclimate.network as network
-from greeclimate.exceptions import DeviceNotBoundError, DeviceTimeoutError
+from greeclimate import network
+
+from .const import (
+    HUMIDITY_MAX,
+    HUMIDITY_MIN,
+    TEMP_MAX,
+    TEMP_MAX_TABLE,
+    TEMP_MIN,
+    TEMP_MIN_TABLE,
+    TEMP_OFFSET,
+    TEMP_TABLE,
+    generate_temperature_record,
+)
+from .exceptions import (
+    DeviceNotBoundError,
+    DeviceTimeoutError,
+    KeyNotRetrievedError,
+    NoDataReceivedError,
+)
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class Props(enum.Enum):
+    """Gree AC device props."""
+
     POWER = "Pow"
     MODE = "Mod"
 
@@ -41,77 +65,72 @@ class Props(enum.Enum):
 
 @unique
 class TemperatureUnits(IntEnum):
+    """Temperature units."""
+
     C = 0
     F = 1
 
 
 @unique
 class Mode(IntEnum):
-    Auto = 0
-    Cool = 1
-    Dry = 2
-    Fan = 3
-    Heat = 4
+    """HVAC modes."""
+
+    AUTO = 0
+    COOL = 1
+    DRY = 2
+    FAN = 3
+    HEAT = 4
 
 
 @unique
 class FanSpeed(IntEnum):
-    Auto = 0
-    Low = 1
-    MediumLow = 2
-    Medium = 3
-    MediumHigh = 4
-    High = 5
+    """Fan speeds."""
+
+    AUTO = 0
+    LOW = 1
+    MEDIUM_LOW = 2
+    MEDIUM = 3
+    MEDIUM_HIGH = 4
+    HIGH = 5
 
 
 @unique
 class HorizontalSwing(IntEnum):
-    Default = 0
-    FullSwing = 1
-    Left = 2
-    LeftCenter = 3
-    Center = 4
-    RightCenter = 5
-    Right = 6
+    """Horizontal swing."""
+
+    DEFAULT = 0
+    FULL_SWING = 1
+    LEFT = 2
+    LEFT_CENTER = 3
+    CENTER = 4
+    RIGHT_CENTER = 5
+    RIGHT = 6
 
 
 @unique
 class VerticalSwing(IntEnum):
-    Default = 0
-    FullSwing = 1
-    FixedUpper = 2
-    FixedUpperMiddle = 3
-    FixedMiddle = 4
-    FixedLowerMiddle = 5
-    FixedLower = 6
-    SwingUpper = 7
-    SwingUpperMiddle = 8
-    SwingMiddle = 9
-    SwingLowerMiddle = 10
-    SwingLower = 11
+    """Vertical swing."""
+
+    DEFAULT = 0
+    FULL_SWING = 1
+    FIXED_UPPER = 2
+    FIXED_UPPER_MIDDLE = 3
+    FIXED_MIDDLE = 4
+    FIXED_LOWER_MIDDLE = 5
+    FIXED_LOWER = 6
+    SWING_UPPER = 7
+    SWING_UPPER_MIDDLE = 8
+    SWING_MIDDLE = 9
+    SWING_LOWER_MIDDLE = 10
+    SWING_LOWER = 11
+
 
 class DehumidifierMode(IntEnum):
-    Default = 0
-    AnionOnly = 9
+    """Dehumidifier mode."""
 
-def generate_temperature_record(temp_f):
-    temSet = round((temp_f - 32.0) * 5.0 / 9.0)
-    temRec = (int)((((temp_f - 32.0) * 5.0 / 9.0) - temSet) > 0)
-    return {"f": temp_f, "temSet": temSet, "temRec": temRec}
+    DEFAULT = 0
+    ANION_ONLY = 9
 
-
-TEMP_MIN = 8
-TEMP_MAX = 30
-TEMP_OFFSET = 40
-TEMP_MIN_F = 46
-TEMP_MAX_F = 86
-TEMP_MIN_TABLE = -60
-TEMP_MAX_TABLE = 60
-TEMP_MIN_TABLE_F = -76
-TEMP_MAX_TABLE_F = 140
-TEMP_TABLE = [generate_temperature_record(x) for x in range(TEMP_MIN_TABLE_F, TEMP_MAX_TABLE_F + 1)]
-HUMIDITY_MIN = 30
-HUMIDITY_MAX = 80
 
 class DeviceInfo:
     """Device information class, used to identify and connect
@@ -123,7 +142,28 @@ class DeviceInfo:
         name: Name of unit, if available
     """
 
-    def __init__(self, ip, port, mac, name, brand=None, model=None, version=None):
+    def __init__(
+        self,
+        ip: str,
+        port: int,
+        mac: str,
+        name: Optional[str] = None,
+        brand: Optional[str] = None,
+        model: Optional[str] = None,
+        version: Optional[str] = None,
+    ) -> None:
+        """
+        Initialize DeviceInfo.
+
+        Args:
+            ip (str): IP address (ipv4 only) of the physical device.
+            mac (str): mac address, in the format 'aabbcc112233'.
+            port (int): Usually this will always be 7000.
+            name (Optional[str]): Name of unit, if available.
+            brand (Optional[str]): Brand of the device.
+            model (Optional[str]): Model of the device.
+            version (Optional[str]): Version of the device.
+        """
         self.ip = ip
         self.port = port
         self.mac = mac
@@ -133,6 +173,7 @@ class DeviceInfo:
         self.version = version
 
     def __str__(self):
+        """String representation of DeviceInfo"""
         return f"Device: {self.name} @ {self.ip}:{self.port} (mac: {self.mac})"
 
     def __eq__(self, other):
@@ -152,7 +193,7 @@ class DeviceInfo:
         return not self.__eq__(other)
 
 
-class Device:
+class Device:  # pylint: disable=too-many-public-methods
     """Class representing a physical device, it's state and properties.
 
     Devices must be bound, either by discovering their presence, or supplying a persistent
@@ -166,7 +207,8 @@ class Device:
         power: A boolean indicating if the unit is on or off
         mode: An int indicating operating mode, see `Mode` enum for possible values
         target_temperature: The target temperature, ignore if in Auto, Fan or Steady Heat mode
-        temperature_units: An int indicating unit of measurement, see `TemperatureUnits` enum for possible values
+        temperature_units: An int indicating unit of measurement,
+            see `TemperatureUnits` enum for possible values
         current_temperature: The current temperature
         fan_speed: An int indicating fan speed, see `FanSpeed` enum for possible values
         fresh_air: A boolean indicating if fresh air valve is open, if present
@@ -174,8 +216,10 @@ class Device:
         anion: A boolean to enable the ozone generator, if present
         sleep: A boolean to enable sleep mode, which adjusts temperature over time
         light: A boolean to enable the light on the unit, if present
-        horizontal_swing: An int to control the horizontal blade position, see `HorizontalSwing` enum for possible values
-        vertical_swing: An int to control the vertical blade position, see `VerticalSwing` enum for possible values
+        horizontal_swing: An int to control the horizontal blade position,
+            see `HorizontalSwing` enum for possible values
+        vertical_swing: An int to control the vertical blade position,
+            see `VerticalSwing` enum for possible values
         quiet: A boolean to enable quiet operation
         turbo: A boolean to enable turbo operation (heat or cool faster initially)
         steady_heat: When enabled unit will maintain a target temperature of 8 degrees C
@@ -186,66 +230,39 @@ class Device:
         water_full: A bool to indicate the water tank is full
     """
 
-    def __init__(self, device_info):
-        self._logger = logging.getLogger(__name__)
-
+    def __init__(self, device_info: DeviceInfo) -> None:
+        """Initialize the device."""
         self.device_info = device_info
-        self.device_key = None
+        self.device_key: Optional[str] = None
+        self.version: Optional[str] = None
+        self._properties: Dict[str, Any] = {}
+        self._dirty: List[str] = []
 
-        """ Device properties """
-        self.hid = None
-        self.version = None
-        self._properties = None
-        self._dirty = []
+    async def bind(self) -> None:
+        """Run the binding procedure and return the device key."""
 
-    async def bind(self, key=None):
-        """Run the binding procedure.
-
-        Binding is a finnicky procedure, and happens in 1 of 2 ways:
-            1 - Without the key, binding must pass the device info structure immediately following
-                the search devices procedure. There is only a small window to complete registration.
-            2 - With a key, binding is implicit and no further action is required
-
-            Both approaches result in a device_key which is used as like a persitent session id.
-
-        Args:
-            key (str): The device key, when provided binding is a NOOP, if None binding will
-                       attempt to negatiate the key with the device.
-
-        Raises:
-            DeviceNotBoundError: If binding was unsuccessful and no key returned
-            DeviceTimeoutError: The device didn't respond
-        """
-
-        if not self.device_info:
-            raise DeviceNotBoundError
-
-        self._logger.info("Starting device binding to %s", str(self.device_info))
+        _LOGGER.info("Starting device binding to %s", str(self.device_info))
 
         try:
-            if key:
-                self.device_key = key
-            else:
-                self.device_key = await network.bind_device(
-                    self.device_info, announce=False
-                )
-        except asyncio.TimeoutError:
-            raise DeviceTimeoutError
-
-        if not self.device_key:
-            raise DeviceNotBoundError
-        else:
-            self._logger.info("Bound to device using key %s", self.device_key)
+            self.device_key = await network.bind_device(self.device_info)
+        except (asyncio.TimeoutError, NoDataReceivedError) as err:
+            # try new GCM encryption. Will be added in future PR
+            raise DeviceTimeoutError from err
+        except KeyNotRetrievedError:
+            return None
 
     async def request_version(self) -> None:
         """Request the firmware version from the device."""
+        if self.device_key is None:
+            raise DeviceNotBoundError
         ret = await network.request_state(["hid"], self.device_info, self.device_key)
-        self.hid = ret.get("hid")
+        hid: Optional[str] = ret.get("hid")
 
         # Ex: hid = 362001000762+U-CS532AE(LT)V3.31.bin
-        if self.hid:
-            match = re.search(r"(?<=V)([\d.]+)\.bin$", self.hid)
-            self.version = match and match.group(1)
+        if hid:
+            match = re.search(r"(?<=V)([\d.]+)\.bin$", hid)
+            if match and match.group(1) is not None:
+                self.version = match.group(1)
 
             # Special case firmwares ...
             # if (
@@ -255,12 +272,11 @@ class Device:
             # ):
             #     self.version = "4.0"
 
-    async def update_state(self):
+    async def update_state(self) -> None:
         """Update the internal state of the device structure of the physical device"""
-        if not self.device_key:
-            await self.bind()
-
-        self._logger.debug("Updating device properties for (%s)", str(self.device_info))
+        if self.device_key is None:
+            raise DeviceNotBoundError
+        _LOGGER.debug("Updating device properties for (%s)", self.device_info)
 
         props = [x.value for x in Props]
 
@@ -272,30 +288,29 @@ class Device:
             # This check should prevent need to do version & device overrides
             # to correctly compute the temperature. Though will need to confirm
             # that it resolves all possible cases.
-            if not self.hid:
+            if not self.version:
                 await self.request_version()
 
-            temp = self.get_property(Props.TEMP_SENSOR)
-            if temp and temp < TEMP_OFFSET:
-                self.version = "4.0"
+        except asyncio.TimeoutError as err:
+            raise DeviceTimeoutError from err
 
-        except asyncio.TimeoutError:
-            raise DeviceTimeoutError
+        temp = self.get_property(Props.TEMP_SENSOR)
+        if temp and temp < TEMP_OFFSET:
+            self.version = "4.0"
 
-    async def push_state_update(self):
+    async def push_state_update(self) -> None:
         """Push any pending state updates to the unit"""
+        if self.device_key is None:
+            raise DeviceNotBoundError
         if not self._dirty:
             return
 
-        if not self.device_key:
-            await self.bind()
-
-        self._logger.debug("Pushing state updates to (%s)", str(self.device_info))
+        _LOGGER.debug("Pushing state updates to (%s)", self.device_info)
 
         props = {}
         for name in self._dirty:
             value = self._properties.get(name)
-            self._logger.debug("Sending remote state update %s -> %s", name, value)
+            _LOGGER.debug("Sending remote state update %s -> %s", name, value)
             props[name] = value
             if name == Props.TEMP_SET.value:
                 props[Props.TEMP_BIT.value] = self._properties.get(Props.TEMP_BIT.value)
@@ -307,44 +322,41 @@ class Device:
 
         try:
             await network.send_state(props, self.device_info, key=self.device_key)
-        except asyncio.TimeoutError:
-            raise DeviceTimeoutError
+        except asyncio.TimeoutError as err:
+            raise DeviceTimeoutError from err
 
-    def get_property(self, name):
+    def get_property(self, name: Props) -> Any:
         """Generic lookup of properties tracked from the physical device"""
-        if self._properties:
-            return self._properties.get(name.value)
-        return None
+        return self._properties.get(name.value)
 
-    def set_property(self, name, value):
+    def set_property(self, name: Props, value: Any) -> None:
         """Generic setting of properties for the physical device"""
-        if not self._properties:
-            self._properties = {}
-
         if self._properties.get(name.value) == value:
             return
-        else:
-            self._properties[name.value] = value
-            if name.value not in self._dirty:
-                self._dirty.append(name.value)
+        self._properties[name.value] = value
+        if name.value not in self._dirty:
+            self._dirty.append(name.value)
 
     @property
     def power(self) -> bool:
+        """Power status of the device."""
         return bool(self.get_property(Props.POWER))
 
     @power.setter
-    def power(self, value: int):
+    def power(self, value: int) -> None:
         self.set_property(Props.POWER, int(value))
 
     @property
     def mode(self) -> int:
+        """Mode of the device."""
         return self.get_property(Props.MODE)
 
     @mode.setter
-    def mode(self, value: int):
+    def mode(self, value: int) -> None:
         self.set_property(Props.MODE, int(value))
 
-    def _convert_to_units(self, value, bit):
+    def _convert_to_units(self, value: int, bit: int) -> int:
+        """Convert the value from the device to the requested unit"""
         if self.temperature_units != TemperatureUnits.F.value:
             return value
 
@@ -362,12 +374,13 @@ class Device:
 
     @property
     def target_temperature(self) -> int:
+        """Target temperature of the device."""
         temSet = self.get_property(Props.TEMP_SET)
         temRec = self.get_property(Props.TEMP_BIT)
         return self._convert_to_units(temSet, temRec)
 
     @target_temperature.setter
-    def target_temperature(self, value: int):
+    def target_temperature(self, value: int) -> None:
         def validate(val):
             if val > TEMP_MAX or val < TEMP_MIN:
                 raise ValueError(f"Specified temperature {val} is out of range.")
@@ -383,14 +396,16 @@ class Device:
 
     @property
     def temperature_units(self) -> int:
+        """Unit of temperature of the device."""
         return self.get_property(Props.TEMP_UNIT)
 
     @temperature_units.setter
-    def temperature_units(self, value: int):
+    def temperature_units(self, value: int) -> None:
         self.set_property(Props.TEMP_UNIT, int(value))
 
     @property
     def current_temperature(self) -> int:
+        """Current temperature of the device."""
         prop = self.get_property(Props.TEMP_SENSOR)
         bit = self.get_property(Props.TEMP_BIT)
         if prop is not None:
@@ -398,7 +413,7 @@ class Device:
             try:
                 if v == 4:
                     return self._convert_to_units(prop, bit)
-                elif prop != 0:
+                if prop != 0:
                     return self._convert_to_units(prop - TEMP_OFFSET, bit)
             except ValueError:
                 logging.warning("Converting unexpected set temperature value %s", prop)
@@ -407,125 +422,141 @@ class Device:
 
     @property
     def fan_speed(self) -> int:
+        """Fan speed of the device."""
         return self.get_property(Props.FAN_SPEED)
 
     @fan_speed.setter
-    def fan_speed(self, value: int):
+    def fan_speed(self, value: int) -> None:
         self.set_property(Props.FAN_SPEED, int(value))
 
     @property
     def fresh_air(self) -> bool:
+        """Fresh air status of the device."""
         return bool(self.get_property(Props.FRESH_AIR))
 
     @fresh_air.setter
-    def fresh_air(self, value: bool):
+    def fresh_air(self, value: bool) -> None:
         self.set_property(Props.FRESH_AIR, int(value))
 
     @property
     def xfan(self) -> bool:
+        """X-Fan status of the device."""
         return bool(self.get_property(Props.XFAN))
 
     @xfan.setter
-    def xfan(self, value: bool):
+    def xfan(self, value: bool) -> None:
         self.set_property(Props.XFAN, int(value))
 
     @property
     def anion(self) -> bool:
+        """Anion status of the device."""
         return bool(self.get_property(Props.ANION))
 
     @anion.setter
-    def anion(self, value: bool):
+    def anion(self, value: bool) -> None:
         self.set_property(Props.ANION, int(value))
 
     @property
     def sleep(self) -> bool:
+        """Sleep status of the device."""
         return bool(self.get_property(Props.SLEEP))
 
     @sleep.setter
-    def sleep(self, value: bool):
+    def sleep(self, value: bool) -> None:
         self.set_property(Props.SLEEP, int(value))
         self.set_property(Props.SLEEP_MODE, int(value))
 
     @property
     def light(self) -> bool:
+        """Light status of the device."""
         return bool(self.get_property(Props.LIGHT))
 
     @light.setter
-    def light(self, value: bool):
+    def light(self, value: bool) -> None:
         self.set_property(Props.LIGHT, int(value))
 
     @property
     def horizontal_swing(self) -> int:
+        """Horizontal swing of the device."""
         return self.get_property(Props.SWING_HORIZ)
 
     @horizontal_swing.setter
-    def horizontal_swing(self, value: int):
+    def horizontal_swing(self, value: int) -> None:
         self.set_property(Props.SWING_HORIZ, int(value))
 
     @property
     def vertical_swing(self) -> int:
+        """Vertical swing of the device."""
         return self.get_property(Props.SWING_VERT)
 
     @vertical_swing.setter
-    def vertical_swing(self, value: int):
+    def vertical_swing(self, value: int) -> None:
         self.set_property(Props.SWING_VERT, int(value))
 
     @property
     def quiet(self) -> bool:
+        """Quiet status of the device."""
         return self.get_property(Props.QUIET)
 
     @quiet.setter
-    def quiet(self, value: bool):
+    def quiet(self, value: bool) -> None:
         self.set_property(Props.QUIET, 2 if value else 0)
 
     @property
     def turbo(self) -> bool:
+        """Turbo status of the device."""
         return bool(self.get_property(Props.TURBO))
 
     @turbo.setter
-    def turbo(self, value: bool):
+    def turbo(self, value: bool) -> None:
         self.set_property(Props.TURBO, int(value))
 
     @property
     def steady_heat(self) -> bool:
+        """Steady heat status of the device."""
         return bool(self.get_property(Props.STEADY_HEAT))
 
     @steady_heat.setter
-    def steady_heat(self, value: bool):
+    def steady_heat(self, value: bool) -> None:
         self.set_property(Props.STEADY_HEAT, int(value))
 
     @property
     def power_save(self) -> bool:
+        """Power save status of the device."""
         return bool(self.get_property(Props.POWER_SAVE))
 
     @power_save.setter
-    def power_save(self, value: bool):
+    def power_save(self, value: bool) -> None:
         self.set_property(Props.POWER_SAVE, int(value))
 
     @property
     def target_humidity(self) -> int:
-        15 + (self.get_property(Props.HUM_SET) * 5)
-    
+        """Target humidity of the device."""
+        return 15 + (self.get_property(Props.HUM_SET) * 5)
+
     @target_humidity.setter
-    def target_humidity(self, value: int):
-        def validate(val):
-            if value > HUMIDITY_MAX or val < HUMIDITY_MIN:
-                raise ValueError(f"Specified temperature {val} is out of range.")
-        
+    def target_humidity(self, value: int) -> None:
+        if value > HUMIDITY_MAX or value < HUMIDITY_MIN:
+            raise ValueError(f"Specified temperature {value} is out of range.")
+
         self.set_property(Props.HUM_SET, (value - 15) // 5)
 
     @property
     def dehumidifier_mode(self):
+        """Dehumidifier mode of the device."""
         return self.get_property(Props.DEHUMIDIFIER_MODE)
 
     @property
     def current_humidity(self) -> int:
+        """Current humidity of the device."""
         return self.get_property(Props.HUM_SENSOR)
 
     @property
     def clean_filter(self) -> bool:
+        """Clean filter status of the device."""
         return bool(self.get_property(Props.CLEAN_FILTER))
 
     @property
     def water_full(self) -> bool:
+        """Water full status of the device."""
         return bool(self.get_property(Props.WATER_FULL))

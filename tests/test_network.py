@@ -2,15 +2,16 @@ import asyncio
 import json
 import socket
 from threading import Thread
-from unittest.mock import create_autospec, patch
+from unittest.mock import patch
 
 import pytest
 
+from greeclimate.const import DISCOVERY_REQUEST
 from greeclimate.network import (
     BroadcastListenerProtocol,
     DatagramStream,
     DeviceProtocol,
-    DeviceProtocol2,
+    DeviceProtocolEvent,
     IPAddr,
     bind_device,
     create_datagram_stream,
@@ -18,14 +19,13 @@ from greeclimate.network import (
     send_state,
 )
 
+from . import MOCK_DEVICE, MOCK_DEVICE_INFO
 from .common import (
     DEFAULT_RESPONSE,
     DEFAULT_TIMEOUT,
-    DISCOVERY_REQUEST,
     DISCOVERY_RESPONSE,
     Responder,
-    encrypt_payload,
-    get_mock_device_info,
+    _encrypt_payload,
 )
 
 
@@ -52,7 +52,7 @@ async def test_close_connection(addr, bcast, family):
     bcast = (bcast, 7000)
     local_addr = (addr[0], 0)
 
-    with patch.object(DeviceProtocol2, "connection_lost") as mock:
+    with patch.object(DeviceProtocolEvent, "connection_lost") as mock:
         dp2 = FakeDiscovery()
         await loop.create_datagram_endpoint(
             lambda: dp2,
@@ -77,7 +77,7 @@ async def test_close_connection(addr, bcast, family):
 async def test_set_get_key():
     """Test the encryption key property."""
     key = "faketestkey"
-    dp2 = DeviceProtocol2()
+    dp2 = DeviceProtocolEvent()
     dp2.device_key = key
     assert dp2.device_key == key
 
@@ -86,7 +86,7 @@ async def test_set_get_key():
 @pytest.mark.parametrize("addr,bcast", [(("127.0.0.1", 7001), "127.255.255.255")])
 async def test_connection_error(addr, bcast):
     """Test the encryption key property."""
-    dp2 = DeviceProtocol2()
+    dp2 = DeviceProtocolEvent()
 
     loop = asyncio.get_event_loop()
     transport, _ = await loop.create_datagram_endpoint(
@@ -106,7 +106,7 @@ async def test_connection_error(addr, bcast):
 async def test_pause_resume(addr, bcast):
     """Test the encryption key property."""
     event = asyncio.Event()
-    dp2 = DeviceProtocol2(drained=event)
+    dp2 = DeviceProtocolEvent(drained=event)
 
     loop = asyncio.get_event_loop()
     transport, _ = await loop.create_datagram_endpoint(
@@ -137,7 +137,7 @@ async def test_broadcast_recv(addr, bcast, family):
             p = json.loads(d)
             assert p == DISCOVERY_REQUEST
 
-            p = json.dumps(encrypt_payload(DISCOVERY_RESPONSE))
+            p = json.dumps(_encrypt_payload(DISCOVERY_RESPONSE))
             s.sendto(p.encode(), addr)
 
         serv = Thread(target=responder, args=(sock,))
@@ -291,10 +291,10 @@ async def test_create_stream(addr, family):
 def test_encrypt_decrypt_payload():
     test_object = {"fake-key": "fake-value"}
 
-    encrypted = DeviceProtocol2.encrypt_payload(test_object)
+    encrypted = _encrypt_payload(test_object)
     assert encrypted != test_object
 
-    decrypted = DeviceProtocol2.decrypt_payload(encrypted)
+    decrypted = DeviceProtocolEvent.decrypt_payload(encrypted)
     assert decrypted == test_object
 
 
@@ -335,17 +335,15 @@ async def test_send_receive_device_data(addr, family):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("addr,family", [(("127.0.0.1", 7000), socket.AF_INET)])
-async def test_bind_device(addr, family):
+async def test_bind_device(addr: IPAddr, family: int) -> None:
     with Responder(family, addr[1]) as sock:
 
-        def responder(s):
+        def responder(s: socket.socket) -> None:
             (d, addr) = s.recvfrom(2048)
             p = json.loads(d)
 
             r = DEFAULT_RESPONSE
-            r["pack"] = DeviceProtocol2.encrypt_payload(
-                {"t": "bindok", "key": "acbd1234"}
-            )
+            r["pack"] = _encrypt_payload({"t": "bindok", "key": "acbd1234"})
             p = json.dumps(r)
             s.sendto(p.encode(), addr)
 
@@ -353,7 +351,7 @@ async def test_bind_device(addr, family):
         serv.start()
 
         # Run the listener portion now
-        response = await bind_device(get_mock_device_info())
+        response = await bind_device(MOCK_DEVICE_INFO)
 
         assert response
         assert response == "acbd1234"
@@ -371,7 +369,7 @@ async def test_send_and_update_device_status_using_val(addr, family):
             p = json.loads(d)
 
             r = DEFAULT_RESPONSE
-            r["pack"] = DeviceProtocol2.encrypt_payload(
+            r["pack"] = _encrypt_payload(
                 {"opt": ["prop-a", "prop-b"], "val": ["val-a", "val-b"]}
             )
             p = json.dumps(r)
@@ -382,7 +380,7 @@ async def test_send_and_update_device_status_using_val(addr, family):
 
         # Run the listener portion now
         properties = {"prop-a": "val-a", "prop-b": "val-b"}
-        response = await send_state(properties, get_mock_device_info())
+        response = await send_state(properties, MOCK_DEVICE)
 
         assert response
         assert response == properties
@@ -400,7 +398,7 @@ async def test_send_and_update_device_status_using_p(addr, family):
             p = json.loads(d)
 
             r = DEFAULT_RESPONSE
-            r["pack"] = DeviceProtocol2.encrypt_payload(
+            r["pack"] = _encrypt_payload(
                 {"opt": ["prop-a", "prop-b"], "p": ["val-a", "val-b"]}
             )
             p = json.dumps(r)
@@ -411,7 +409,7 @@ async def test_send_and_update_device_status_using_p(addr, family):
 
         # Run the listener portion now
         properties = {"prop-a": "val-a", "prop-b": "val-b"}
-        response = await send_state(properties, get_mock_device_info())
+        response = await send_state(properties, MOCK_DEVICE)
 
         assert response
         assert response == properties
@@ -429,7 +427,7 @@ async def test_request_device_status(addr, family):
             p = json.loads(d)
 
             r = DEFAULT_RESPONSE
-            r["pack"] = DeviceProtocol2.encrypt_payload(
+            r["pack"] = _encrypt_payload(
                 {"cols": ["prop-a", "prop-b"], "dat": ["val-a", "val-b"]}
             )
             p = json.dumps(r)
@@ -440,7 +438,7 @@ async def test_request_device_status(addr, family):
 
         # Run the listener portion now
         properties = {"prop-a": "val-a", "prop-b": "val-b"}
-        response = await request_state(properties, get_mock_device_info())
+        response = await request_state(properties, MOCK_DEVICE)
 
         assert response
         assert response == properties

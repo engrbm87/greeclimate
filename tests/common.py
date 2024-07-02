@@ -1,12 +1,10 @@
-import asyncio
 import socket
 from socket import SOCK_DGRAM
-from unittest.mock import Mock, create_autospec, patch
+from typing import Any, Dict, Optional
 
-from greeclimate.network import DeviceProtocol2
+from greeclimate.network import GENERIC_KEY, DeviceProtocolEvent, encrypt_payload
 
 DEFAULT_TIMEOUT = 5
-DISCOVERY_REQUEST = {"t": "scan"}
 DISCOVERY_RESPONSE = {
     "t": "pack",
     "i": 1,
@@ -61,33 +59,21 @@ DEFAULT_RESPONSE = {
 }
 
 
-def get_mock_device_info():
-    return Mock(
-        name="device-info",
-        ip="127.0.0.1",
-        port="7000",
-        mac="aabbcc112233",
-        brand="gree",
-        model="gree",
-        version="1.1.13",
-    )
-
-
-def encrypt_payload(data):
+def _encrypt_payload(data: Dict[str, Any]) -> Dict[str, Any]:
     """Encrypt the payload of responses quickly."""
     d = data.copy()
-    d["pack"] = DeviceProtocol2.encrypt_payload(d["pack"])
+    d["pack"] = encrypt_payload(d["pack"], GENERIC_KEY)
     return d
 
 
 class Responder:
     """Context manage for easy raw socket responders."""
 
-    def __init__(self, family, addr) -> None:
+    def __init__(self, family: int, port: int) -> None:
         """Initialize the class."""
-        self.sock = None
+        self.sock: Optional[socket.socket] = None
         self.family = family
-        self.addr = addr
+        self.port = port
 
     def __enter__(self):
         """Enter the context manager."""
@@ -95,9 +81,10 @@ class Responder:
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         self.sock.settimeout(DEFAULT_TIMEOUT)
-        self.sock.bind(("", self.addr))
+        self.sock.bind(("", self.port))
         return self.sock
 
     def __exit__(self, *args):
         """Exit the context manager."""
-        self.sock.close()
+        if self.sock is not None:
+            self.sock.close()

@@ -1,7 +1,10 @@
 """Pytest module configuration."""
+
 from unittest.mock import patch
 
 import pytest
+
+from greeclimate import Device, DeviceInfo
 
 MOCK_INTERFACES = ["lo"]
 MOCK_LO_IFACE = {
@@ -16,3 +19,10 @@ def netifaces_fixture():
         "netifaces.ifaddresses", return_value=MOCK_LO_IFACE
     ) as ifaddr_mock:
         yield ifaddr_mock
+
+
+@pytest.fixture(name="mock_device")
+async def setup_mock_device() -> Device:
+    device = Device(DeviceInfo("192.168.1.29", "f4911e7aca59", 7000, "1e7aca59"))
+    device.device_key = "St8Vw1Yz4Bc7Ef0H"
+    return device

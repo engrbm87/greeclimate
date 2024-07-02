@@ -30,15 +30,22 @@ class DiscoveryListener(Listener):
 
 async def run_discovery(bind=False):
     """Run the device discovery process."""
-    _LOGGER.debug("Scanning network for Gree devices")
+    # _LOGGER.debug("Scanning network for Gree devices")
 
-    discovery = Discovery()
-    listener = DiscoveryListener(bind)
-    discovery.add_listener(listener)
+    # discovery = Discovery()
+    # listener = DiscoveryListener(bind)
+    # discovery.add_listener(listener)
 
-    await discovery.scan(wait_for=10)
+    # await discovery.scan(wait_for=10)
 
-    _LOGGER.info("Done discovering devices")
+    # _LOGGER.info("Done discovering devices")
+    device = Device(
+        DeviceInfo(
+            "192.168.88.42", 7000, "9424b8bb14bc", "gree", "gree", "gree", "V2.0.20"
+        )
+    )
+    await device.bind()
+    await device.request_version()
 
 
 if __name__ == "__main__":
@@ -47,5 +54,5 @@ if __name__ == "__main__":
     parser.add_argument("--bind", default=False, action="store_true")
     args = parser.parse_args()
 
-    if args.discovery:
-        asyncio.run(run_discovery(args.bind))
+    # if args.discovery:
+    asyncio.run(run_discovery(args.bind))

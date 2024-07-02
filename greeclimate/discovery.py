@@ -1,3 +1,5 @@
+"""Gree climate device discovery."""
+
 from __future__ import annotations
 
 import asyncio
@@ -5,10 +7,11 @@ import logging
 from asyncio import Task
 from asyncio.events import AbstractEventLoop
 from ipaddress import IPv4Address
-from typing import Coroutine, List
+from typing import Any, Coroutine, Dict, List, Optional
 
-from greeclimate.device import DeviceInfo
-from greeclimate.network import BroadcastListenerProtocol, IPAddr
+from .const import DEFAULT_PORT, DISCOVERY_REQUEST
+from .device import DeviceInfo
+from .network import BroadcastListenerProtocol, IPAddr
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -34,9 +37,9 @@ class Discovery(BroadcastListenerProtocol, Listener):
         self,
         timeout: int = 2,
         allow_loopback: bool = False,
-        loop: AbstractEventLoop = None,
+        loop: Optional[AbstractEventLoop] = None,
     ):
-        """Intialized the discovery manager.
+        """Initialized the discovery manager.
 
         Args:
             timeout (int): Wait this long for responses to the scan request
@@ -47,16 +50,16 @@ class Discovery(BroadcastListenerProtocol, Listener):
         self._timeout = timeout
         self._allow_loopback = allow_loopback
 
-        self._device_infos = []
-        self._listeners = []
-        self._tasks = []
+        self._device_infos: List[DeviceInfo] = []
+        self._listeners: set[Listener] = set()
+        self._tasks: List[Task] = []
 
         self._loop = loop or asyncio.get_event_loop()
         self._transport = None
 
     # Task management
     @property
-    def tasks(self) -> List[Coroutine]:
+    def tasks(self) -> List[Task]:
         """Returns the outstanding tasks waiting completion."""
         return self._tasks
 
@@ -65,12 +68,12 @@ class Discovery(BroadcastListenerProtocol, Listener):
         """Return the current known list of devices."""
         return self._device_infos
 
-    def _task_done_callback(self, task):
+    def _task_done_callback(self, task: Task) -> None:
         if task.exception():
             _LOGGER.exception("Uncaught exception", exc_info=task.exception())
         self._tasks.remove(task)
 
-    def _create_task(self, coro) -> Task:
+    def _create_task(self, coro: Coroutine[Any, Any, None]) -> Task:
         """Create and track tasks that are being created for events."""
         task = self._loop.create_task(coro)
         self._tasks.append(task)
@@ -78,7 +81,7 @@ class Discovery(BroadcastListenerProtocol, Listener):
         return task
 
     # Listener management
-    def add_listener(self, listener: Listener) -> List[Coroutine]:
+    def add_listener(self, listener: Listener) -> None:
         """Add a listener that will receive discovery events.
 
         Adding a listener will cause all currently known device to trigger a
@@ -86,13 +89,11 @@ class Discovery(BroadcastListenerProtocol, Listener):
 
         Args:
             listener (Listener): A listener object which will receive events
-
-        Returns:
-            List[Coro]: List of tasks for device found events.
         """
-        if not listener in self._listeners:
-            self._listeners.append(listener)
-            return [self._create_task(listener.device_found(x)) for x in self.devices]
+        if listener not in self._listeners:
+            self._listeners.add(listener)
+            for device in self.devices:
+                self._create_task(listener.device_found(device))
 
     def remove_listener(self, listener: Listener) -> bool:
         """Remove a listener that has already been registered.
@@ -125,7 +126,10 @@ class Discovery(BroadcastListenerProtocol, Listener):
                     # ip address info may have been updated, so store the new info
                     # and trigger a `device_update` event.
                     self._device_infos[index] = device_info
-                    tasks = [l.device_update(device_info) for l in self._listeners]
+                    tasks = [
+                        listener.device_update(device_info)
+                        for listener in self._listeners
+                    ]
                     await asyncio.gather(*tasks, return_exceptions=True)
                 return
 
@@ -133,30 +137,32 @@ class Discovery(BroadcastListenerProtocol, Listener):
 
         _LOGGER.info("Found gree device %s", str(device_info))
 
-        tasks = [l.device_found(device_info) for l in self._listeners]
+        tasks = [listener.device_found(device_info) for listener in self._listeners]
         await asyncio.gather(*tasks, return_exceptions=True)
 
-    def packet_received(self, obj, addr: IPAddr) -> None:
+    def packet_received(self, obj: Dict[str, Any], addr: IPAddr) -> None:
         """Event called when a packet is received and decoded."""
-        pack = obj.get("pack")
+        pack: Optional[Dict[str, Any]] = obj.get("pack")
         if not pack:
             _LOGGER.error("Received an unexpected response during discovery")
             return
 
-        device = (
+        device_info = DeviceInfo(
             addr[0],
             addr[1],
-            pack.get("mac") or pack.get("cid"),
+            pack.get("mac") or pack["cid"],
             pack.get("name"),
             pack.get("brand"),
             pack.get("model"),
             pack.get("ver"),
         )
 
-        self._create_task(self.device_found(DeviceInfo(*device)))
+        self._create_task(self.device_found(device_info))
 
     # Discovery
-    async def scan(self, wait_for: int=0, bcast_ifaces: List[IPv4Address] | None=None) -> List[DeviceInfo]:
+    async def scan(
+        self, wait_for=0, bcast_ifaces: Optional[List[IPv4Address]] = None
+    ) -> List[DeviceInfo]:
         """Sends a discovery broadcast packet on each network interface to
             locate Gree units on the network
 
@@ -178,9 +184,10 @@ class Discovery(BroadcastListenerProtocol, Listener):
 
     def _get_broadcast_addresses(self) -> List[IPv4Address]:
         """Return a list of broadcast addresses for each discovered interface"""
+        # pylint: disable=import-outside-toplevel
         import netifaces
 
-        bdrAddrs = []
+        broadcast_addresses: List[IPv4Address] = []
         for iface in netifaces.interfaces():
             for addr in netifaces.ifaddresses(iface).get(netifaces.AF_INET, []):
                 ipaddr = addr.get("addr")
@@ -190,31 +197,33 @@ class Discovery(BroadcastListenerProtocol, Listener):
                     ip4addr = IPv4Address(ipaddr)
                     if ip4addr.is_loopback and self._allow_loopback:
                         if bdr or peer:
-                            bdrAddrs.append(IPv4Address(bdr or peer))
+                            broadcast_addresses.append(IPv4Address(bdr or peer))
                     elif not ip4addr.is_loopback:
                         if bdr:
-                            bdrAddrs.append(IPv4Address(bdr))
+                            broadcast_addresses.append(IPv4Address(bdr))
 
-        return bdrAddrs
+        return broadcast_addresses
 
     async def search_on_interface(self, bcast_iface: IPv4Address) -> None:
         """Search for devices on a specific interface."""
-        _LOGGER.debug(
-            "Listening for devices on %s",
-            bcast_iface,
-        )
+        _LOGGER.debug("Listening for devices on %s", bcast_iface)
 
         if self._transport is None:
             self._transport, _ = await self._loop.create_datagram_endpoint(
                 lambda: self, local_addr=("0.0.0.0", 0), allow_broadcast=True
             )
 
-        await self.send({"t": "scan"}, (str(bcast_iface), 7000))
+        await self.send(DISCOVERY_REQUEST, (str(bcast_iface), DEFAULT_PORT))
 
-    async def search_devices(self, broadcastAddrs: list[IPv4Address] | None = None) -> None:
+    async def search_devices(
+        self, broadcast_addresses: Optional[List[IPv4Address]] = None
+    ) -> None:
         """Search for devices with specific broadcast addresses."""
-        if not broadcastAddrs:
-            broadcastAddrs = self._get_broadcast_addresses()
+        if not broadcast_addresses:
+            broadcast_addresses = self._get_broadcast_addresses()
         await asyncio.gather(
-            *[asyncio.create_task(self.search_on_interface(b)) for b in broadcastAddrs]
+            *[
+                asyncio.create_task(self.search_on_interface(broadcast_address))
+                for broadcast_address in broadcast_addresses
+            ]
         )
